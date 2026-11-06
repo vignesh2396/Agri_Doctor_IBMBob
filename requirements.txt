@@ -1,0 +1,16 @@
+# Agri Doctor — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Core Streamlit App ────────────────────────────────────────────────────────
+streamlit>=1.35.0
+
+# ── IBM watsonx AI integration ────────────────────────────────────────────────
+ibm-cloud-sdk-core>=3.18.0
+requests>=2.31.0
+
+# ── Image processing ──────────────────────────────────────────────────────────
+Pillow>=10.0.0
+
+# ── Video generation (create_video.py) ───────────────────────────────────────
+moviepy>=1.0.3
+numpy>=1.24.0
