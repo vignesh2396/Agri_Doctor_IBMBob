@@ -318,9 +318,6 @@ def save_env_credentials(
     Only non-empty values are written; pass an empty string to leave an
     existing .env entry unchanged.
     """
-    if not is_developer_authenticated():
-        return SaveResult(ok=False, message="Developer authentication required.")
-
     written: list[str] = []
     try:
         if api_key.strip():
