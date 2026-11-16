@@ -21,10 +21,24 @@ Guardrails are enforced at every touchpoint:
 import base64
 import hashlib
 import json
+import os
 import textwrap
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
+
+# ── Environment variables ──────────────────────────────────────────────────
+# python-dotenv is imported here; the actual load_dotenv() call happens inside
+# main() on every Streamlit rerun so that edits to .env are picked up
+# immediately without restarting the server.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _DOTENV_PATH = Path(__file__).parent / ".env"
+    _HAS_DOTENV  = True
+except ImportError:
+    _HAS_DOTENV  = False
+    _DOTENV_PATH = None
 
 import requests
 import streamlit as st
@@ -66,15 +80,22 @@ from metrics import (
     estimate_input_tokens,
 )
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-IBM_PUBLIC_ENDPOINT = "https://eu-de.ml.cloud.ibm.com"
-IBM_PROJECT_ID      = "38de3042-7dea-4687-9452-979220f75f7b"
+# ── Credential manager ─────────────────────────────────────────────────────
+from credential_manager import (
+    KNOWN_REGIONS,
+    CredentialSet,
+    ValidationResult,
+    clear_session_credentials,
+    get_credential_source,
+    resolve_credentials,
+    store_session_credentials,
+    validate_credentials,
+)
 
+# ---------------------------------------------------------------------------
+# Constants  (static values that do not vary per-credential-set)
+# ---------------------------------------------------------------------------
 MODEL_ID = "ibm/granite-4-h-small"
-
-INFERENCE_URL = f"{IBM_PUBLIC_ENDPOINT}/ml/v1/text/chat?version=2024-05-31"
 
 MAX_TOKENS_PATHOLOGIST = 900
 MAX_TOKENS_EXTENSION   = 1100
@@ -185,10 +206,18 @@ def _call_watsonx(
 ) -> str:
     """
     POST to IBM watsonx /ml/v1/text/chat.
+    Credentials (endpoint, project_id) are resolved dynamically from the
+    credential manager on each call so that session/env changes take effect
+    without a server restart.
     Enforces: Tool Execution (endpoint, model, payload) + Operational (token budget).
     """
+    # Resolve live credentials for this call
+    creds        = resolve_credentials()
+    inference_url = creds.inference_url
+    project_id    = creds.project_id
+
     # 3-A: endpoint allow-list
-    ep_result = validate_tool_endpoint(INFERENCE_URL)
+    ep_result = validate_tool_endpoint(inference_url)
     _record_guardrail(ep_result)
     if not ep_result.passed:
         raise RuntimeError(ep_result.message)
@@ -205,7 +234,7 @@ def _call_watsonx(
 
     payload = {
         "model_id":   MODEL_ID,
-        "project_id": IBM_PROJECT_ID,
+        "project_id": project_id,
         "messages":   messages,
         "parameters": {
             "max_new_tokens":  max_new_tokens,
@@ -240,7 +269,7 @@ def _call_watsonx(
     _t_start = time.time()
     try:
         response = requests.post(
-            INFERENCE_URL, headers=headers, json=payload, timeout=90
+            inference_url, headers=headers, json=payload, timeout=90
         )
     except requests.exceptions.Timeout:
         _t_end = time.time()
@@ -692,6 +721,12 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
 
+    # ── Reload .env on every rerun so edits are reflected immediately ─────
+    # override=True ensures a changed value in .env overwrites whatever was
+    # previously in os.environ (from an earlier run with the old value).
+    if _HAS_DOTENV:
+        _load_dotenv(dotenv_path=_DOTENV_PATH, override=True)
+
     _init_session()
 
     # ── Sidebar ───────────────────────────────────────────────────────────
@@ -704,16 +739,154 @@ def main() -> None:
         st.caption("AI-Powered Crop Disease Diagnosis  •  v2.0")
         st.divider()
 
+        # ── ⚙️ Configuration panel ──────────────────────────────────────────
         st.subheader("⚙️ Configuration")
-        api_key_input = st.text_input(
-            "IBM Cloud API Key",
-            type="password",
-            placeholder="Paste your IBM Cloud API key here",
-            help=(
-                "Your API key is used only during this session to obtain a "
-                "short-lived IAM token. It is never stored, logged, or displayed."
-            ),
-        )
+
+        # Resolve current credentials to pre-populate the fields
+        _creds_now = resolve_credentials()
+        _src       = _creds_now.source   # "session" | "env" | "default"
+
+        # Source badge
+        _src_badge = {
+            "session": "🟢 **Active source: Website (session)**",
+            "env":     "🔵 **Active source: `.env` file**",
+            "default": "🟡 **Active source: Defaults** *(no API key set)*",
+        }[_src]
+        st.markdown(_src_badge)
+
+        # Expand the settings panel by default only when no key is available
+        _expand_settings = not _creds_now.is_complete
+        with st.expander("🔧 Edit Credentials", expanded=_expand_settings):
+            st.caption(
+                "Values entered here are kept **only for this session** and are "
+                "never written to the `.env` file or committed to Git."
+            )
+
+            # ── API Key ──────────────────────────────────────────────────
+            _ui_key = st.text_input(
+                "IBM Cloud API Key",
+                value=_creds_now.api_key if _src == "session" else "",
+                type="password",
+                placeholder=(
+                    "Pre-filled from .env"
+                    if _src in ("env", "default")
+                    else "Paste key to override"
+                ),
+                help=(
+                    "Your IBM Cloud API key (Manage → Access (IAM) → API keys). "
+                    "Leave blank to use the IBM_CLOUD_API_KEY value from the .env file."
+                ),
+                key="_ui_api_key",
+            )
+
+            # ── Region / Endpoint ────────────────────────────────────────
+            _region_names   = list(KNOWN_REGIONS.keys()) + ["Custom URL…"]
+            _current_ep     = _creds_now.endpoint
+            _matched_region = next(
+                (r for r, url in KNOWN_REGIONS.items() if url == _current_ep),
+                "Custom URL…",
+            )
+            _region_choice = st.selectbox(
+                "Region / Endpoint",
+                options=_region_names,
+                index=_region_names.index(_matched_region),
+                help=(
+                    "Select the IBM watsonx region that matches your project. "
+                    "Leave unchanged to use IBM_ENDPOINT_URL from .env."
+                ),
+                key="_ui_region",
+            )
+            if _region_choice == "Custom URL…":
+                _ui_endpoint = st.text_input(
+                    "Custom Endpoint URL",
+                    value=_current_ep if _matched_region == "Custom URL…" else "",
+                    placeholder="https://your-region.ml.cloud.ibm.com",
+                    key="_ui_custom_ep",
+                )
+            else:
+                _ui_endpoint = KNOWN_REGIONS[_region_choice]
+                st.caption(f"→ `{_ui_endpoint}`")
+
+            # ── Project ID ───────────────────────────────────────────────
+            _ui_project = st.text_input(
+                "Project ID",
+                value=_creds_now.project_id if _src == "session" else "",
+                placeholder=(
+                    "Pre-filled from .env / default"
+                    if _src in ("env", "default")
+                    else "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                ),
+                help=(
+                    "Your IBM watsonx.ai Project ID (Projects → Manage → General). "
+                    "Leave blank to use IBM_PROJECT_ID from .env."
+                ),
+                key="_ui_project_id",
+            )
+
+            # ── Action buttons ───────────────────────────────────────────
+            _col_apply, _col_validate, _col_clear = st.columns(3)
+
+            with _col_apply:
+                if st.button("💾 Apply", use_container_width=True,
+                             help="Save these credentials for this session"):
+                    store_session_credentials(
+                        api_key    = _ui_key,
+                        project_id = _ui_project,
+                        endpoint   = _ui_endpoint,
+                    )
+                    st.success("Credentials saved for this session.", icon="✅")
+                    st.rerun()
+
+            with _col_validate:
+                if st.button("🔍 Validate", use_container_width=True,
+                             help="Test credentials against IBM Cloud now"):
+                    # Build a temporary CredentialSet from the current UI fields
+                    _test_creds = resolve_credentials()
+                    if _ui_key:
+                        from credential_manager import CredentialSet as _CS
+                        _test_creds = _CS(
+                            api_key    = _ui_key    or _test_creds.api_key,
+                            project_id = _ui_project or _test_creds.project_id,
+                            endpoint   = _ui_endpoint or _test_creds.endpoint,
+                            source     = "session",
+                        )
+                    with st.spinner("Validating with IBM Cloud…"):
+                        _vr = validate_credentials(_test_creds)
+                    if _vr.ok:
+                        st.success(_vr.message, icon="✅")
+                    elif _vr.error_type == "invalid_key":
+                        st.error(f"❌ Invalid API key — {_vr.message}")
+                    elif _vr.error_type == "invalid_project":
+                        st.error(f"❌ Invalid project/region — {_vr.message}")
+                    elif _vr.error_type in ("network", "timeout"):
+                        st.warning(f"⚠️ Connectivity issue — {_vr.message}")
+                    else:
+                        st.error(f"❌ {_vr.message}")
+
+            with _col_clear:
+                if st.button("🔄 Reset", use_container_width=True,
+                             help="Clear session credentials and revert to .env"):
+                    clear_session_credentials()
+                    st.info("Session credentials cleared. Reverted to .env values.", icon="ℹ️")
+                    st.rerun()
+
+            st.caption(
+                "💡 To change defaults permanently, edit the `.env` file — "
+                "changes are detected on the next page interaction without restarting the server."
+            )
+
+        # Resolve again after any potential Apply/Reset above
+        _active_creds = resolve_credentials()
+        api_key_input = _active_creds.api_key   # used by the pipeline below
+
+        # Quick status line under the expander
+        if _active_creds.is_complete:
+            if _active_creds.source == "session":
+                st.caption("🟢 Using session credentials.")
+            else:
+                st.caption(f"🔵 Using `.env` credentials — region: `{_active_creds.endpoint}`")
+        else:
+            st.caption("🔴 No API key set. Enter one above or populate `.env`.")
 
         st.divider()
         st.subheader("🛡️ Guardrail Monitor")
@@ -744,10 +917,12 @@ def main() -> None:
         st.divider()
         st.page_link("pages/dashboard.py", label="📊 Open Performance Dashboard", icon="📊")
         st.divider()
+        _disp_creds = resolve_credentials()
         st.caption(
             "⚠ AI-generated preliminary assessment only.\n"
             "Not a confirmed laboratory diagnosis.\n"
-            f"Model: `{MODEL_ID}`"
+            f"Model: `{MODEL_ID}`\n"
+            f"Region: `{_disp_creds.endpoint}`"
         )
 
     # ── Main area ─────────────────────────────────────────────────────────
@@ -809,7 +984,9 @@ def main() -> None:
             )
             if not api_key_input:
                 st.warning(
-                    "Enter your IBM Cloud API key in the sidebar to enable diagnosis.",
+                    "No API key active. Open **⚙️ Configuration → 🔧 Edit Credentials** "
+                    "in the sidebar to enter your IBM Cloud API key, "
+                    "or populate `IBM_CLOUD_API_KEY` in the `.env` file.",
                     icon="🔑",
                 )
 
