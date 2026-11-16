@@ -82,13 +82,9 @@ from metrics import (
 
 # ── Credential manager ─────────────────────────────────────────────────────
 from credential_manager import (
-    KNOWN_REGIONS,
     CredentialSet,
-    ValidationResult,
-    clear_session_credentials,
     get_credential_source,
     resolve_credentials,
-    store_session_credentials,
     validate_credentials,
 )
 
@@ -731,22 +727,17 @@ def main() -> None:
 
     # ── Sidebar ───────────────────────────────────────────────────────────
     with st.sidebar:
-        st.image(
-            "https://upload.wikimedia.org/wikipedia/commons/5/51/IBM_logo.svg",
-            width=80,
-        )
         st.title("🌿 Agri Doctor")
         st.caption("AI-Powered Crop Disease Diagnosis  •  v2.0")
         st.divider()
 
-        # ── ⚙️ Configuration panel ──────────────────────────────────────────
+        # ── ⚙️ Configuration status (read-only for farmer users) ────────────
         st.subheader("⚙️ Configuration")
 
-        # Resolve current credentials to pre-populate the fields
-        _creds_now = resolve_credentials()
-        _src       = _creds_now.source   # "session" | "env" | "default"
+        _active_creds = resolve_credentials()
+        _src          = _active_creds.source   # "session" | "env" | "default"
 
-        # Source badge
+        # Read-only source badge — no credential fields exposed here
         _src_badge = {
             "session": "🟢 **Active source: Website (session)**",
             "env":     "🔵 **Active source: `.env` file**",
@@ -754,139 +745,15 @@ def main() -> None:
         }[_src]
         st.markdown(_src_badge)
 
-        # Expand the settings panel by default only when no key is available
-        _expand_settings = not _creds_now.is_complete
-        with st.expander("🔧 Edit Credentials", expanded=_expand_settings):
-            st.caption(
-                "Values entered here are kept **only for this session** and are "
-                "never written to the `.env` file or committed to Git."
-            )
-
-            # ── API Key ──────────────────────────────────────────────────
-            _ui_key = st.text_input(
-                "IBM Cloud API Key",
-                value=_creds_now.api_key if _src == "session" else "",
-                type="password",
-                placeholder=(
-                    "Pre-filled from .env"
-                    if _src in ("env", "default")
-                    else "Paste key to override"
-                ),
-                help=(
-                    "Your IBM Cloud API key (Manage → Access (IAM) → API keys). "
-                    "Leave blank to use the IBM_CLOUD_API_KEY value from the .env file."
-                ),
-                key="_ui_api_key",
-            )
-
-            # ── Region / Endpoint ────────────────────────────────────────
-            _region_names   = list(KNOWN_REGIONS.keys()) + ["Custom URL…"]
-            _current_ep     = _creds_now.endpoint
-            _matched_region = next(
-                (r for r, url in KNOWN_REGIONS.items() if url == _current_ep),
-                "Custom URL…",
-            )
-            _region_choice = st.selectbox(
-                "Region / Endpoint",
-                options=_region_names,
-                index=_region_names.index(_matched_region),
-                help=(
-                    "Select the IBM watsonx region that matches your project. "
-                    "Leave unchanged to use IBM_ENDPOINT_URL from .env."
-                ),
-                key="_ui_region",
-            )
-            if _region_choice == "Custom URL…":
-                _ui_endpoint = st.text_input(
-                    "Custom Endpoint URL",
-                    value=_current_ep if _matched_region == "Custom URL…" else "",
-                    placeholder="https://your-region.ml.cloud.ibm.com",
-                    key="_ui_custom_ep",
-                )
-            else:
-                _ui_endpoint = KNOWN_REGIONS[_region_choice]
-                st.caption(f"→ `{_ui_endpoint}`")
-
-            # ── Project ID ───────────────────────────────────────────────
-            _ui_project = st.text_input(
-                "Project ID",
-                value=_creds_now.project_id if _src == "session" else "",
-                placeholder=(
-                    "Pre-filled from .env / default"
-                    if _src in ("env", "default")
-                    else "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                ),
-                help=(
-                    "Your IBM watsonx.ai Project ID (Projects → Manage → General). "
-                    "Leave blank to use IBM_PROJECT_ID from .env."
-                ),
-                key="_ui_project_id",
-            )
-
-            # ── Action buttons ───────────────────────────────────────────
-            _col_apply, _col_validate, _col_clear = st.columns(3)
-
-            with _col_apply:
-                if st.button("💾 Apply", use_container_width=True,
-                             help="Save these credentials for this session"):
-                    store_session_credentials(
-                        api_key    = _ui_key,
-                        project_id = _ui_project,
-                        endpoint   = _ui_endpoint,
-                    )
-                    st.success("Credentials saved for this session.", icon="✅")
-                    st.rerun()
-
-            with _col_validate:
-                if st.button("🔍 Validate", use_container_width=True,
-                             help="Test credentials against IBM Cloud now"):
-                    # Build a temporary CredentialSet from the current UI fields
-                    _test_creds = resolve_credentials()
-                    if _ui_key:
-                        from credential_manager import CredentialSet as _CS
-                        _test_creds = _CS(
-                            api_key    = _ui_key    or _test_creds.api_key,
-                            project_id = _ui_project or _test_creds.project_id,
-                            endpoint   = _ui_endpoint or _test_creds.endpoint,
-                            source     = "session",
-                        )
-                    with st.spinner("Validating with IBM Cloud…"):
-                        _vr = validate_credentials(_test_creds)
-                    if _vr.ok:
-                        st.success(_vr.message, icon="✅")
-                    elif _vr.error_type == "invalid_key":
-                        st.error(f"❌ Invalid API key — {_vr.message}")
-                    elif _vr.error_type == "invalid_project":
-                        st.error(f"❌ Invalid project/region — {_vr.message}")
-                    elif _vr.error_type in ("network", "timeout"):
-                        st.warning(f"⚠️ Connectivity issue — {_vr.message}")
-                    else:
-                        st.error(f"❌ {_vr.message}")
-
-            with _col_clear:
-                if st.button("🔄 Reset", use_container_width=True,
-                             help="Clear session credentials and revert to .env"):
-                    clear_session_credentials()
-                    st.info("Session credentials cleared. Reverted to .env values.", icon="ℹ️")
-                    st.rerun()
-
-            st.caption(
-                "💡 To change defaults permanently, edit the `.env` file — "
-                "changes are detected on the next page interaction without restarting the server."
-            )
-
-        # Resolve again after any potential Apply/Reset above
-        _active_creds = resolve_credentials()
-        api_key_input = _active_creds.api_key   # used by the pipeline below
-
-        # Quick status line under the expander
         if _active_creds.is_complete:
-            if _active_creds.source == "session":
+            if _src == "session":
                 st.caption("🟢 Using session credentials.")
             else:
                 st.caption(f"🔵 Using `.env` credentials — region: `{_active_creds.endpoint}`")
         else:
-            st.caption("🔴 No API key set. Enter one above or populate `.env`.")
+            st.caption("🔴 No API key configured. Contact your administrator.")
+
+        api_key_input = _active_creds.api_key   # used by the pipeline below
 
         st.divider()
         st.subheader("🛡️ Guardrail Monitor")
@@ -984,8 +851,8 @@ def main() -> None:
             )
             if not api_key_input:
                 st.warning(
-                    "No API key active. Open **⚙️ Configuration → 🔧 Edit Credentials** "
-                    "in the sidebar to enter your IBM Cloud API key, "
+                    "No API key is configured. Ask your administrator to set up "
+                    "credentials via the **⚙️ Developer Config** page, "
                     "or populate `IBM_CLOUD_API_KEY` in the `.env` file.",
                     icon="🔑",
                 )

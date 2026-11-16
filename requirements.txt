@@ -17,5 +17,9 @@ Pillow>=10.0.0
 # ── Numerical (used by image analysis helpers) ────────────────────────────────
 numpy>=1.24.0
 
+# ── Security — developer config page (password hashing + credential encryption)
+bcrypt>=4.0.0
+cryptography>=41.0.0
+
 # ── Video generation (create_video.py — local dev only, not needed for the app)
 # moviepy>=1.0.3
