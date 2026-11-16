@@ -90,11 +90,11 @@ _DEV_SESSION_TTL = 3600   # 1 hour
 # Default bcrypt hash for password "changeme"  (cost factor 12)
 # MUST be overridden via DEV_ADMIN_PASSWORD_HASH in .env / Streamlit secrets.
 _DEFAULT_BCRYPT_HASH = (
-    b"$2b$12$cCH.J3g3mfMCp2.f9dGH7OybRVEnJ4.QkQ5nH8xVvGcB.kP1JoAEy"
+    b"$2b$12$5c9ZS.0ZG/INIPE2e9MbqejH3JeT0Ydibr.qANFep7pkfD2ST37Om"
 )
 # SHA-256 hex of "changeme" — used only when bcrypt is absent
 _DEFAULT_SHA256_HASH = (
-    "bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721"
+    "057ba03d6c44104863dc7361fe4578965d1887360f90a0895882e58a6248fc86"
 )
 
 # Env var names the config page may read/write
